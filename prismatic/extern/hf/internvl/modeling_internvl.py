@@ -699,6 +699,8 @@ class OpenVLAInternVLForActionPrediction(PrismaticInternVLForConditionalGenerati
         Returns:
             Tuple of (unnormalized_actions, action_hidden_states)
         """
+        # NOTE(claude): removed "Out:" vs "Out: " handling here. Instead I fixed input being passed to here
+
         pixel_values = kwargs["pixel_values"]
         attention_mask = kwargs["attention_mask"]
 
