@@ -196,7 +196,7 @@ class PrismaticInternVLForConditionalGeneration(InternVLForConditionalGeneration
                 device=attention_mask.device,
             )
 
-        # Build multimodal embeddings & attention mask; insert embeddings after <BOS> token (1:)
+        # Build multimodal embeddings & attention mask; insert embeddings after <BOS> token (1:) # NOTE: author's mistake here. BOS is not present in reality.
         multimodal_embeddings = torch.cat(
             [input_embeddings[:, :1, :], projected_patch_embeddings, input_embeddings[:, 1:, :]], dim=1
         )
