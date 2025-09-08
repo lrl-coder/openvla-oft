@@ -29,7 +29,7 @@ class PurePromptBuilder(PromptBuilder):
     def __init__(self, model_family: str, system_prompt: Optional[str] = None) -> None:
         super().__init__(model_family, system_prompt)
 
-        # TODO (siddk) =>> Can't always assume LlamaTokenizer --> FIX ME!
+        # TODO (siddk) =>> Can't always assume LlamaTokenizer --> FIX ME! NOTE(claude): bos/eos here is actually not used, no need to worry
         self.bos, self.eos = "<s>", "</s>"
 
         # Get role-specific "wrap" functions

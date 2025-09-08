@@ -1,0 +1,9 @@
+from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
+
+from .configuration_internvl import OpenVLAInternVLConfig
+from .modeling_internvl import OpenVLAInternVLForActionPrediction
+from .processing_internvl import PrismaticInternVLProcessor
+
+AutoConfig.register("openvla_internvl", OpenVLAInternVLConfig)
+AutoProcessor.register(OpenVLAInternVLConfig, PrismaticInternVLProcessor)
+AutoModelForImageTextToText.register(OpenVLAInternVLConfig, OpenVLAInternVLForActionPrediction)

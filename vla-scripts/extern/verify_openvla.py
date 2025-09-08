@@ -9,10 +9,10 @@ import time
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoModelForVision2Seq, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor
 
 # === Verification Arguments
-MODEL_PATH = "openvla/openvla-7b"
+MODEL_PATH = "/mnt/harbor/projects/owa/checkpoints/OpenVLA-InternVL3-1B-hf"
 SYSTEM_PROMPT = (
     "A chat between a curious user and an artificial intelligence assistant. "
     "The assistant gives helpful, detailed, and polite answers to the user's questions."
@@ -21,10 +21,14 @@ INSTRUCTION = "put spoon on towel"
 
 
 def get_openvla_prompt(instruction: str) -> str:
-    if "v01" in MODEL_PATH:
-        return f"{SYSTEM_PROMPT} USER: What action should the robot take to {instruction.lower()}? ASSISTANT:"
-    else:
-        return f"In: What action should the robot take to {instruction.lower()}?\nOut:"
+    return f"In: What action should the robot take to {instruction.lower()}?<IMG_CONTEXT>\nOut: "
+
+
+def register():
+    import importlib
+
+    importlib.import_module("prismatic.extern.hf")
+    print("[*] Registered!")
 
 
 @torch.inference_mode()
@@ -38,7 +42,7 @@ def verify_openvla() -> None:
 
     # === BFLOAT16 + FLASH-ATTN MODE ===
     print("[*] Loading in BF16 with Flash-Attention Enabled")
-    vla = AutoModelForVision2Seq.from_pretrained(
+    vla = AutoModelForImageTextToText.from_pretrained(
         MODEL_PATH,
         attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
@@ -74,7 +78,7 @@ def verify_openvla() -> None:
         image = Image.fromarray(np.asarray(np.random.rand(256, 256, 3) * 255, dtype=np.uint8))
 
         # === BFLOAT16 MODE ===
-        inputs = processor(prompt, image).to(device, dtype=torch.bfloat16)
+        inputs = processor(text=prompt, images=image, return_tensors="pt").to(device, dtype=torch.bfloat16)
 
         # === 8-BIT/4-BIT QUANTIZATION MODE ===
         # inputs = processor(prompt, image).to(device, dtype=torch.float16)
@@ -86,4 +90,6 @@ def verify_openvla() -> None:
 
 
 if __name__ == "__main__":
+    register()
+
     verify_openvla()
