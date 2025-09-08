@@ -21,7 +21,7 @@ INSTRUCTION = "put spoon on towel"
 
 
 def get_openvla_prompt(instruction: str) -> str:
-    return f"In: What action should the robot take to {instruction.lower()}?<IMG_CONTEXT>\nOut: "
+    return f"In: What action should the robot take to {instruction.lower()}?\nOut: "
 
 
 def register():

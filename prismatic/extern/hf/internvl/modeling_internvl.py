@@ -77,7 +77,7 @@ class PrismaticInternVLForConditionalGeneration(InternVLForConditionalGeneration
             self.vision_backbone, "num_images_in_input", x
         )
         self.vision_backbone.get_num_images_in_input = lambda: self.vision_backbone.num_images_in_input
-        self.vision_backbone.get_num_patches = lambda: 256
+        self.vision_backbone.get_num_patches = lambda: 64  # width/patch_size/pixel_shuffle=224/14/2=8, 8*8=64
 
         # From Prismatic
         self.vocab_size = config.text_config.vocab_size
@@ -165,9 +165,11 @@ class PrismaticInternVLForConditionalGeneration(InternVLForConditionalGeneration
 
     # NOTE(claude): revised here
     def _process_vision_features(self, pixel_values, language_embeddings=None, use_film=False):
-        # reshape pixel_values into [num_images, C, H, W]
+        # pixel_values: [num_images, C, H, W]
         assert not use_film, "FiLM not supported for InternVL!"
-        return self.get_image_features(pixel_values)
+        if pixel_values.shape[1] == 6:
+            pixel_values = pixel_values[:, :3, :, :]  # remove DINOv2 features
+        return self.get_image_features(pixel_values)  # [num_images, image_length, embed_dim]
 
     def _process_proprio_features(self, projected_patch_embeddings, proprio, proprio_projector):
         """Process proprioceptive features and append to vision features"""
@@ -193,7 +195,7 @@ class PrismaticInternVLForConditionalGeneration(InternVLForConditionalGeneration
                 device=attention_mask.device,
             )
 
-        # Build multimodal embeddings & attention mask; insert embeddings after <BOS> token (1:) # NOTE: author's mistake here. BOS is not present in reality.
+        # Build multimodal embeddings & attention mask; insert embeddings after <BOS> token (1:) # NOTE(claude): author's mistake here. BOS is not present in reality.
         multimodal_embeddings = torch.cat(
             [input_embeddings[:, :1, :], projected_patch_embeddings, input_embeddings[:, 1:, :]], dim=1
         )
@@ -458,13 +460,13 @@ class OpenVLAInternVLForActionPrediction(PrismaticInternVLForConditionalGenerati
 
     def _prepare_input_for_action_prediction(self, input_ids, attention_mask):
         """Prepares input for action prediction by adding necessary tokens"""
-        # Add (ACTION_DIM * NUM_ACTIONS_CHUNK) placeholder tokens to input_ids to simulate action tokens
+        # Add (ACTION_DIM * NUM_ACTIONS_CHUNK) placeholder tokens to input_ids to simulate action tokens NOTE(cluade): 1="/" in Qwen2
         placeholder_action_token_ids = (
             torch.ones((input_ids.shape[0], ACTION_DIM * NUM_ACTIONS_CHUNK)).to(input_ids.device).to(input_ids.dtype)
         )
         input_ids = torch.cat([input_ids, placeholder_action_token_ids], dim=-1)
 
-        # Add stop token to sequence (needed in non-causal bi-directional self-attention, as it appears at train time)
+        # Add stop token to sequence (needed in non-causal bi-directional self-attention, as it appears at train time) NOTE(claude): STOP_INDEX=2="#" in Qwen2
         stop_token_id = torch.ones((input_ids.shape[0], 1)).to(input_ids.device).to(input_ids.dtype) * STOP_INDEX
         input_ids = torch.cat([input_ids, stop_token_id], dim=-1)
 
@@ -704,7 +706,7 @@ class OpenVLAInternVLForActionPrediction(PrismaticInternVLForConditionalGenerati
         labels = input_ids.clone()
         labels[:] = IGNORE_INDEX
 
-        # Get number of tokens in prompt (excluding the start token)
+        # Get number of tokens in prompt (excluding the start token) NOTE(claude): checked here, -1 needed afterwise because predicted is shifted-by-one
         NUM_PROMPT_TOKENS = input_ids.shape[-1] - 1  # Subtract action tokens and stop token
 
         # Prepare inputs by adding necessary tokens
