@@ -96,11 +96,11 @@ First, download the LIBERO datasets as mentioned above in the Setup section abov
 Then, launch the fine-tuning script with the OFT configuration below, replacing `X` in the first line with the number of GPUs. The command below launches fine-tuning on LIBERO-Spatial with the hyperparameters that we used in our paper. Here, batch size 8 per GPU will require ~62 GB VRAM, and batch size 1 per GPU will require ~25 GB VRAM.
 
 ```bash
-torchrun --standalone --nnodes 1 --nproc-per-node X vla-scripts/finetune.py \
+torchrun --standalone --nnodes 1 --nproc-per-node 8 vla-scripts/finetune.py \
   --vla_path openvla/openvla-7b \
-  --data_root_dir /PATH/TO/RLDS/DATASETS/DIR/ \
+  --data_root_dir /mnt/harbor/projects/owa/data/modified_libero_rlds \
   --dataset_name libero_spatial_no_noops \
-  --run_root_dir /YOUR/CHECKPOINTS/AND/LOG/DIR/ \
+  --run_root_dir /mnt/harbor/projects/owa/checkpoints/openvla-7b-oft-finetuned-libero-spatial \
   --use_l1_regression True \
   --use_diffusion False \
   --use_film False \
@@ -114,8 +114,8 @@ torchrun --standalone --nnodes 1 --nproc-per-node X vla-scripts/finetune.py \
   --save_latest_checkpoint_only False \
   --image_aug True \
   --lora_rank 32 \
-  --wandb_entity "YOUR_WANDB_ENTITY" \
-  --wandb_project "YOUR_WANDB_PROJECT" \
+  --wandb_entity "milkclouds" \
+  --wandb_project "openvla-oft" \
   --run_id_note parallel_dec--8_acts_chunk--continuous_acts--L1_regression--3rd_person_img--wrist_img--proprio_state
 ```
 
