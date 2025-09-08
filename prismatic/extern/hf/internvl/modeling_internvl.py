@@ -8,17 +8,12 @@ but exactly replicate the logic in `prismatic.models.vlms.prismatic.py`.
 
 import logging
 from dataclasses import dataclass
-from functools import partial
-from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
-import timm
-import tokenizers
 import torch
 import torch.nn as nn
-import transformers
-from timm.models.vision_transformer import LayerScale
-from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
+from transformers import PretrainedConfig
 from transformers.modeling_outputs import ModelOutput
 from transformers.models.internvl import InternVLForConditionalGeneration
 
@@ -67,6 +62,7 @@ class PrismaticInternVLCausalLMOutputWithPast(ModelOutput):
 
 
 class PrismaticInternVLForConditionalGeneration(InternVLForConditionalGeneration):
+    # NOTE(claude): revised here
     def __init__(self, config: OpenVLAInternVLConfig) -> None:
         super().__init__(config)
 
@@ -167,6 +163,7 @@ class PrismaticInternVLForConditionalGeneration(InternVLForConditionalGeneration
         all_actions_mask = current_action_mask | next_actions_mask  # (B, seq_len)
         return all_actions_mask
 
+    # NOTE(claude): revised here
     def _process_vision_features(self, pixel_values, language_embeddings=None, use_film=False):
         # reshape pixel_values into [num_images, C, H, W]
         assert not use_film, "FiLM not supported for InternVL!"
@@ -456,7 +453,7 @@ class OpenVLAInternVLForActionPrediction(PrismaticInternVLForConditionalGenerati
         self.bins = np.linspace(-1, 1, config.n_action_bins)
         self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
-        # Compute vocab size for de-tokenization -- revert added "multiple of" FIXME(claude): removed subtracting pad_to_multiple_of
+        # Compute vocab size for de-tokenization -- revert added "multiple of" NOTE(claude): removed subtracting pad_to_multiple_of
         self.vocab_size = self.config.text_config.vocab_size
 
     def _prepare_input_for_action_prediction(self, input_ids, attention_mask):
@@ -637,7 +634,7 @@ class OpenVLAInternVLForActionPrediction(PrismaticInternVLForConditionalGenerati
             return_dict=True,
         )
 
-        # FIXME: 3 lines added
+        # NOTE(claude): 3 lines added
         hidden_states = language_model_output[0]
         logits = self.lm_head(hidden_states)
         language_model_output.logits = logits
