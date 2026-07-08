@@ -58,7 +58,7 @@ from prismatic.vla.constants import (
     NUM_ACTIONS_CHUNK,
     PROPRIO_DIM,
 )
-from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
+from prismatic.vla.datasets import LeRobotDataset, RLDSBatchTransform, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
 # Sane Defaults
@@ -73,6 +73,7 @@ class FinetuneConfig:
     # Dataset
     data_root_dir: Path = Path("datasets/rlds")      # Directory containing RLDS datasets
     dataset_name: str = "aloha_scoop_x_into_bowl"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
+    dataset_format: str = "rlds"                     # Dataset format: "rlds" or "lerobot"
     run_root_dir: Path = Path("runs")                # Path to directory to store logs & checkpoints
     shuffle_buffer_size: int = 100_000               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
 
@@ -83,6 +84,12 @@ class FinetuneConfig:
     use_film: bool = False                           # If True, uses FiLM to infuse language inputs into visual features
     num_images_in_input: int = 1                     # Number of images in the VLA input (default: 1)
     use_proprio: bool = False                        # If True, includes robot proprioceptive state in input
+    proprio_dim: Optional[int] = None                # Override proprio input dim; defaults to platform PROPRIO_DIM
+    lerobot_state_dim: int = 7                       # Number of leading LeRobot state dims to use as proprio input
+    lerobot_image_key: str = "observation.image"     # LeRobot primary image column
+    lerobot_wrist_image_key: str = "observation.wrist_image"  # LeRobot wrist image column
+    lerobot_state_key: str = "observation.state"     # LeRobot state column
+    lerobot_action_key: str = "action"               # LeRobot action column
 
     # Training configuration
     batch_size: int = 8                              # Batch size per device (total batch size = batch_size * num GPUs)
@@ -331,7 +338,7 @@ def run_forward_pass(
             pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
             labels=batch["labels"],
             output_hidden_states=True,
-            proprio=batch["proprio"] if use_proprio else None,
+            proprio=batch["proprio"].to(torch.bfloat16).to(device_id) if use_proprio else None,
             proprio_projector=proprio_projector if use_proprio else None,
             noisy_actions=noisy_actions if use_diffusion else None,
             noisy_action_projector=noisy_action_projector if use_diffusion else None,
@@ -505,7 +512,7 @@ def run_diffusion_sampling(
                 pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
                 labels=batch["labels"],
                 output_hidden_states=True,
-                proprio=batch["proprio"] if use_proprio else None,
+                proprio=batch["proprio"].to(torch.bfloat16).to(device_id) if use_proprio else None,
                 proprio_projector=proprio_projector if use_proprio else None,
                 noisy_actions=curr_noisy_actions,
                 noisy_action_projector=noisy_action_projector,
@@ -800,6 +807,17 @@ def finetune(cfg: FinetuneConfig) -> None:
         f"\tPROPRIO_DIM: {PROPRIO_DIM}\n"
         f"\tACTION_PROPRIO_NORMALIZATION_TYPE: {ACTION_PROPRIO_NORMALIZATION_TYPE}"
     )
+    if cfg.dataset_format == "lerobot" and cfg.proprio_dim is None:
+        effective_proprio_dim = cfg.lerobot_state_dim
+    else:
+        effective_proprio_dim = cfg.proprio_dim if cfg.proprio_dim is not None else PROPRIO_DIM
+    if cfg.use_proprio:
+        print(f"Using proprio input dim: {effective_proprio_dim}")
+        if cfg.dataset_format == "lerobot" and effective_proprio_dim != cfg.lerobot_state_dim:
+            raise ValueError(
+                f"For LeRobot proprio, proprio_dim ({effective_proprio_dim}) must match "
+                f"lerobot_state_dim ({cfg.lerobot_state_dim})."
+            )
 
     # Two options:
     # (1) Base model is on Hugging Face Hub
@@ -881,7 +899,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             "proprio_projector",
             cfg,
             device_id,
-            {"llm_dim": vla.module.llm_dim, "proprio_dim": PROPRIO_DIM},
+            {"llm_dim": vla.module.llm_dim, "proprio_dim": effective_proprio_dim},
         )
 
     # If applicable, instantiate continuous action head for L1 regression
@@ -967,32 +985,69 @@ def finetune(cfg: FinetuneConfig) -> None:
     use_wrist_image = cfg.num_images_in_input > 1
 
     # Create training and optional validation datasets
-    batch_transform = RLDSBatchTransform(
-        action_tokenizer,
-        processor.tokenizer,
-        image_transform=processor.image_processor.apply_transform,
-        prompt_builder_fn=PurePromptBuilder,
-        use_wrist_image=use_wrist_image,
-        use_proprio=cfg.use_proprio,
-    )
-    train_dataset = RLDSDataset(
-        cfg.data_root_dir,
-        cfg.dataset_name,
-        batch_transform,
-        resize_resolution=tuple(vla.module.config.image_sizes),
-        shuffle_buffer_size=cfg.shuffle_buffer_size,
-        image_aug=cfg.image_aug,
-    )
-    if cfg.use_val_set:
-        val_dataset = RLDSDataset(
+    if cfg.dataset_format == "rlds":
+        batch_transform = RLDSBatchTransform(
+            action_tokenizer,
+            processor.tokenizer,
+            image_transform=processor.image_processor.apply_transform,
+            prompt_builder_fn=PurePromptBuilder,
+            use_wrist_image=use_wrist_image,
+            use_proprio=cfg.use_proprio,
+        )
+        train_dataset = RLDSDataset(
             cfg.data_root_dir,
             cfg.dataset_name,
             batch_transform,
             resize_resolution=tuple(vla.module.config.image_sizes),
-            shuffle_buffer_size=cfg.shuffle_buffer_size // 10,
+            shuffle_buffer_size=cfg.shuffle_buffer_size,
             image_aug=cfg.image_aug,
-            train=False,
         )
+        if cfg.use_val_set:
+            val_dataset = RLDSDataset(
+                cfg.data_root_dir,
+                cfg.dataset_name,
+                batch_transform,
+                resize_resolution=tuple(vla.module.config.image_sizes),
+                shuffle_buffer_size=cfg.shuffle_buffer_size // 10,
+                image_aug=cfg.image_aug,
+                train=False,
+            )
+    elif cfg.dataset_format == "lerobot":
+        train_dataset = LeRobotDataset(
+            cfg.data_root_dir,
+            cfg.dataset_name,
+            action_tokenizer,
+            processor.tokenizer,
+            image_transform=processor.image_processor.apply_transform,
+            prompt_builder_fn=PurePromptBuilder,
+            train=True,
+            use_wrist_image=use_wrist_image,
+            use_proprio=cfg.use_proprio,
+            state_dim=cfg.lerobot_state_dim,
+            image_key=cfg.lerobot_image_key,
+            wrist_image_key=cfg.lerobot_wrist_image_key,
+            state_key=cfg.lerobot_state_key,
+            action_key=cfg.lerobot_action_key,
+        )
+        if cfg.use_val_set:
+            val_dataset = LeRobotDataset(
+                cfg.data_root_dir,
+                cfg.dataset_name,
+                action_tokenizer,
+                processor.tokenizer,
+                image_transform=processor.image_processor.apply_transform,
+                prompt_builder_fn=PurePromptBuilder,
+                train=False,
+                use_wrist_image=use_wrist_image,
+                use_proprio=cfg.use_proprio,
+                state_dim=cfg.lerobot_state_dim,
+                image_key=cfg.lerobot_image_key,
+                wrist_image_key=cfg.lerobot_wrist_image_key,
+                state_key=cfg.lerobot_state_key,
+                action_key=cfg.lerobot_action_key,
+            )
+    else:
+        raise ValueError(f"Unsupported dataset_format: {cfg.dataset_format}")
 
     # [Important] Save dataset statistics so that we can unnormalize actions during inference
     if distributed_state.is_main_process:

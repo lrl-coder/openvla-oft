@@ -5,9 +5,12 @@ Lightweight PyTorch Dataset Definition for wrapping RLDS TFDS Pipeline; just def
 format to OpenVLA, IterableDataset shim.
 """
 
+import json
+import random
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -259,3 +262,230 @@ class DummyDataset(Dataset):
         labels[: -(len(action) + 1)] = IGNORE_INDEX
 
         return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels)
+
+
+class LeRobotDataset(IterableDataset):
+    """
+    Iterable PyTorch dataset for LeRobot v2 parquet datasets.
+
+    It emits the same fields as RLDSBatchTransform/RLDSDataset:
+    pixel_values, optional pixel_values_wrist, input_ids, labels, dataset_name,
+    actions, and optional proprio.
+    """
+
+    def __init__(
+        self,
+        data_root_dir: Path,
+        dataset_name: str,
+        action_tokenizer: ActionTokenizer,
+        base_tokenizer: PreTrainedTokenizerBase,
+        image_transform: ImageTransform,
+        prompt_builder_fn: Type[PromptBuilder],
+        train: bool = True,
+        use_wrist_image: bool = False,
+        use_proprio: bool = False,
+        state_dim: int = 7,
+        image_key: str = "observation.image",
+        wrist_image_key: str = "observation.wrist_image",
+        state_key: str = "observation.state",
+        action_key: str = "action",
+    ) -> None:
+        super().__init__()
+        try:
+            import pyarrow.parquet as pq  # noqa: F401
+        except ImportError as e:
+            raise ImportError("LeRobotDataset requires `pyarrow`; install it with `pip install pyarrow`.") from e
+
+        self.data_root_dir = Path(data_root_dir)
+        self.dataset_name = dataset_name
+        self.repo_dir = self.data_root_dir / dataset_name
+        if not self.repo_dir.exists():
+            self.repo_dir = self.data_root_dir
+        self.action_tokenizer = action_tokenizer
+        self.base_tokenizer = base_tokenizer
+        self.image_transform = image_transform
+        self.prompt_builder_fn = prompt_builder_fn
+        self.train = train
+        self.use_wrist_image = use_wrist_image
+        self.use_proprio = use_proprio
+        self.state_dim = state_dim
+        self.image_key = image_key
+        self.wrist_image_key = wrist_image_key
+        self.state_key = state_key
+        self.action_key = action_key
+
+        self.info = self._load_json(self.repo_dir / "meta" / "info.json")
+        self.tasks = self._load_tasks()
+        self.episode_files = self._resolve_episode_files(train=train)
+        self.dataset_statistics = {self.dataset_name: self._compute_dataset_statistics()}
+        self.dataset_length = self.dataset_statistics[self.dataset_name]["num_transitions"]
+
+    @staticmethod
+    def _load_json(path: Path) -> dict:
+        with open(path, "r") as f:
+            return json.load(f)
+
+    def _load_tasks(self) -> Dict[int, str]:
+        tasks = {}
+        task_path = self.repo_dir / "meta" / "tasks.jsonl"
+        with open(task_path, "r") as f:
+            for line in f:
+                item = json.loads(line)
+                tasks[int(item["task_index"])] = item["task"]
+        return tasks
+
+    @staticmethod
+    def _parse_episode_range(range_str: str) -> Tuple[int, int]:
+        start, end = range_str.split(":")
+        return int(start), int(end)
+
+    def _resolve_episode_files(self, train: bool) -> List[Path]:
+        split_name = "train" if train else "test"
+        split_range = self.info.get("splits", {}).get(split_name)
+        if split_range is None and not train:
+            split_range = self.info.get("splits", {}).get("val")
+        if split_range is None:
+            start, end = 0, int(self.info["total_episodes"])
+        else:
+            start, end = self._parse_episode_range(split_range)
+
+        data_path = self.info["data_path"]
+        paths = []
+        chunks_size = int(self.info.get("chunks_size", 1000))
+        for episode_index in range(start, end):
+            episode_chunk = episode_index // chunks_size
+            paths.append(self.repo_dir / data_path.format(episode_chunk=episode_chunk, episode_index=episode_index))
+        return paths
+
+    @staticmethod
+    def _normalize_bounds_q99(values: np.ndarray, stats: Dict[str, np.ndarray]) -> np.ndarray:
+        q01 = np.asarray(stats["q01"], dtype=np.float32)
+        q99 = np.asarray(stats["q99"], dtype=np.float32)
+        scale = np.maximum(q99 - q01, 1e-6)
+        values = 2.0 * (values - q01) / scale - 1.0
+        return np.clip(values, -1.0, 1.0).astype(np.float32)
+
+    def _compute_dataset_statistics(self) -> Dict[str, Any]:
+        import pyarrow.parquet as pq
+
+        actions, proprio = [], []
+        for episode_file in self.episode_files:
+            table = pq.read_table(episode_file, columns=[self.action_key, self.state_key])
+            rows = table.to_pylist()
+            actions.extend(row[self.action_key] for row in rows)
+            proprio.extend(row[self.state_key][: self.state_dim] for row in rows)
+
+        actions = np.asarray(actions, dtype=np.float32)
+        proprio = np.asarray(proprio, dtype=np.float32)
+        return {
+            "action": {
+                "mean": actions.mean(axis=0),
+                "std": actions.std(axis=0) + 1e-6,
+                "min": actions.min(axis=0),
+                "max": actions.max(axis=0),
+                "q01": np.quantile(actions, 0.01, axis=0),
+                "q99": np.quantile(actions, 0.99, axis=0),
+            },
+            "proprio": {
+                "mean": proprio.mean(axis=0),
+                "std": proprio.std(axis=0) + 1e-6,
+                "min": proprio.min(axis=0),
+                "max": proprio.max(axis=0),
+                "q01": np.quantile(proprio, 0.01, axis=0),
+                "q99": np.quantile(proprio, 0.99, axis=0),
+            },
+            "num_transitions": int(actions.shape[0]),
+            "num_trajectories": len(self.episode_files),
+        }
+
+    @staticmethod
+    def _decode_image(value: Any) -> Image.Image:
+        if isinstance(value, dict):
+            if value.get("bytes") is not None:
+                return Image.open(BytesIO(value["bytes"])).convert("RGB")
+            value = value.get("path")
+        return Image.open(value).convert("RGB")
+
+    def _build_action_chunk(self, actions: np.ndarray, index: int) -> np.ndarray:
+        end = index + NUM_ACTIONS_CHUNK
+        chunk = actions[index:end]
+        if chunk.shape[0] < NUM_ACTIONS_CHUNK:
+            pad = np.repeat(actions[-1][None], NUM_ACTIONS_CHUNK - chunk.shape[0], axis=0)
+            chunk = np.concatenate([chunk, pad], axis=0)
+        return chunk
+
+    def _format_example(self, row: Dict[str, Any], actions: np.ndarray, row_idx: int) -> Dict[str, Any]:
+        stats = self.dataset_statistics[self.dataset_name]
+        action_chunk = self._normalize_bounds_q99(self._build_action_chunk(actions, row_idx), stats["action"])
+        state = np.asarray(row[self.state_key][: self.state_dim], dtype=np.float32)
+        proprio = self._normalize_bounds_q99(state, stats["proprio"])
+
+        img = self._decode_image(row[self.image_key])
+        lang = self.tasks[int(row["task_index"])].lower()
+
+        prompt_builder = self.prompt_builder_fn("openvla")
+        current_action_string = self.action_tokenizer(action_chunk[0])
+        future_actions_string = "".join(self.action_tokenizer(action_chunk[1:]))
+        action_chunk_string = current_action_string + future_actions_string
+        action_chunk_len = len(action_chunk_string)
+
+        conversation = [
+            {"from": "human", "value": f"What action should the robot take to {lang}?"},
+            {"from": "gpt", "value": action_chunk_string},
+        ]
+        for turn in conversation:
+            prompt_builder.add_turn(turn["from"], turn["value"])
+
+        input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+        labels = list(input_ids)
+        input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+        pixel_values = self.image_transform(img)
+        labels[: -(action_chunk_len + 1)] = IGNORE_INDEX
+
+        return_dict = {
+            "pixel_values": pixel_values,
+            "input_ids": input_ids,
+            "labels": labels,
+            "dataset_name": self.dataset_name,
+            "actions": action_chunk,
+        }
+        if self.use_wrist_image and self.wrist_image_key in row:
+            img_wrist = self._decode_image(row[self.wrist_image_key])
+            return_dict["pixel_values_wrist"] = self.image_transform(img_wrist)
+        if self.use_proprio:
+            return_dict["proprio"] = proprio
+        return return_dict
+
+    def _iter_once(self):
+        import pyarrow.parquet as pq
+
+        episode_files = list(self.episode_files)
+        if self.train:
+            random.shuffle(episode_files)
+
+        for episode_file in episode_files:
+            columns = [self.action_key, self.image_key, "task_index"]
+            if self.use_wrist_image:
+                columns.append(self.wrist_image_key)
+            if self.use_proprio:
+                columns.append(self.state_key)
+            elif self.state_key not in columns:
+                columns.append(self.state_key)
+            table = pq.read_table(episode_file, columns=columns)
+            rows = table.to_pylist()
+            actions = np.asarray([row[self.action_key] for row in rows], dtype=np.float32)
+            frame_indices = list(range(len(rows)))
+            if self.train:
+                random.shuffle(frame_indices)
+            for row_idx in frame_indices:
+                yield self._format_example(rows[row_idx], actions, row_idx)
+
+    def __iter__(self):
+        if self.train:
+            while True:
+                yield from self._iter_once()
+        else:
+            yield from self._iter_once()
+
+    def __len__(self) -> int:
+        return self.dataset_length
