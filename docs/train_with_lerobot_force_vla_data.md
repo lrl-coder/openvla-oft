@@ -541,6 +541,15 @@ find /root/autodl-tmp/force_vla_data/data_lerobot/flexiv_pump_1bottle_inputForce
 
 ### 7.3 显存不足怎么办
 
+如果报错类似：
+
+```text
+torch.cuda.OutOfMemoryError: CUDA out of memory
+GPU 0 has a total capacity of 23.52 GiB
+```
+
+说明已经进入模型 forward，但单步显存不够。RTX 4090 24GB 上，`--batch_size 1` 仍可能因为 `num_images_in_input=2`、`lora_rank=32`、7B LLM 激活和 L1 action head 同时存在而 OOM。
+
 优先降低：
 
 ```bash
@@ -566,6 +575,76 @@ find /root/autodl-tmp/force_vla_data/data_lerobot/flexiv_pump_1bottle_inputForce
 ```
 
 注意：如果关闭训练中 LoRA merge，后续需要用 `vla-scripts/merge_lora_weights_and_save.py` 离线合并。
+
+24GB 单卡更稳的启动参数建议：
+
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune.py \
+  --vla_path moojink/openvla-7b-oft-finetuned-libero-spatial \
+  --dataset_format lerobot \
+  --data_root_dir /root/autodl-fs/force_vla_data/data_lerobot \
+  --dataset_name flexiv_pump_1bottle_inputForce \
+  --run_root_dir /root/autodl-tmp/openvla-oft/runs_force_lerobot \
+  --use_l1_regression True \
+  --use_diffusion False \
+  --use_film False \
+  --num_images_in_input 1 \
+  --use_proprio True \
+  --lerobot_state_dim 7 \
+  --proprio_dim 7 \
+  --batch_size 1 \
+  --grad_accumulation_steps 16 \
+  --learning_rate 5e-4 \
+  --num_steps_before_decay 10000 \
+  --max_steps 20000 \
+  --save_freq 999999999 \
+  --save_latest_checkpoint_only False \
+  --merge_lora_during_training False \
+  --image_aug True \
+  --lora_rank 16 \
+  --wandb_entity 1559589961 \
+  --wandb_project openvla-oft-force-vla \
+  --run_id_note flexiv_lerobot_state7_24gb_single_img_lora16
+```
+
+如果仍然 OOM，再继续降：
+
+```bash
+--lora_rank 8
+```
+
+`--grad_accumulation_steps` 只影响有效 batch size 和优化频率，不会显著降低单次 forward/backward 的显存；真正降显存的是减少图像数、降低 LoRA rank、减少可训练模块或换更大显存 GPU。
+
+如果原命令里误用了：
+
+```bash
+--use_film True
+```
+
+也很容易触发 OOM。FiLM 会额外包装 vision backbone，把语言信息注入视觉特征，训练时显存会高于：
+
+```bash
+--use_film False
+```
+
+当前 24GB 单卡建议保持：
+
+```bash
+--use_film False
+```
+
+如果后续必须打开 FiLM，建议同时使用更保守配置：
+
+```bash
+--num_images_in_input 1
+--lora_rank 8
+--batch_size 1
+--grad_accumulation_steps 16
+```
+
+并预期训练速度和显存压力都会更高。
 
 ### 7.4 Hugging Face 权重下载到哪里
 
