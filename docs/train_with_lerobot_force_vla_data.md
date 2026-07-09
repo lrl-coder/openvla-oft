@@ -450,7 +450,7 @@ pip install pyarrow
 export WANDB_MODE=offline
 ```
 
-单卡跑通版命令：
+单卡跑通版命令：~68GB
 
 ```bash
 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune.py \
@@ -466,8 +466,8 @@ torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune.py \
   --use_proprio True \
   --lerobot_state_dim 7 \
   --proprio_dim 7 \
-  --batch_size 1 \
-  --grad_accumulation_steps 8 \
+  --batch_size 8 \
+  --grad_accumulation_steps 1 \
   --learning_rate 5e-4 \
   --num_steps_before_decay 10000 \
   --max_steps 20000 \
